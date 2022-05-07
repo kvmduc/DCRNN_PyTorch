@@ -5,6 +5,7 @@ import pickle
 import scipy.sparse as sp
 import sys
 import tensorflow as tf
+import os.path as osp
 
 from scipy.sparse import linalg
 
@@ -175,24 +176,26 @@ def get_total_trainable_parameter_size():
     return total_parameters
 
 
-def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
+def load_dataset(input_dim, output_dim, year, dataset_dir, batch_size, test_batch_size=None, **kwargs):
     data = {}
     for category in ['train', 'val', 'test']:
-        cat_data = np.load(os.path.join(dataset_dir, category + '.npz'))
-        data['x_' + category] = cat_data['x']
-        data['y_' + category] = cat_data['y']
-    scaler = StandardScaler(mean=data['x_train'][..., 0].mean(), std=data['x_train'][..., 0].std())
+        # cat_data = np.load(os.path.join(dataset_dir, category + '.npz'))
+        cat_data = np.load(osp.join(dataset_dir, str(year)+"_30day.npz"), allow_pickle=True)
+        data['x_' + category] = cat_data[category + '_x']
+        data['y_' + category] = cat_data[category + '_y']
+        data['x_' + category] = np.expand_dims(data['x_' + category], axis = -1)
+        data['y_' + category] = np.expand_dims(data['y_' + category], axis = -1)
+    
+    # scaler = StandardScaler(mean=tf.reduce_mean(data['x_train'][..., 0]), std=tf.reduce_mean(data['x_train'][..., 0]))
     # Data format
-    for category in ['train', 'val', 'test']:
-        data['x_' + category][..., 0] = scaler.transform(data['x_' + category][..., 0])
-        data['y_' + category][..., 0] = scaler.transform(data['y_' + category][..., 0])
+    # for category in ['train', 'val', 'test']:
+        # data['x_' + category][..., 0] = scaler.transform(data['x_' + category][..., 0])
+        # data['y_' + category][..., 0] = scaler.transform(data['y_' + category][..., 0])
     data['train_loader'] = DataLoader(data['x_train'], data['y_train'], batch_size, shuffle=True)
     data['val_loader'] = DataLoader(data['x_val'], data['y_val'], test_batch_size, shuffle=False)
     data['test_loader'] = DataLoader(data['x_test'], data['y_test'], test_batch_size, shuffle=False)
-    data['scaler'] = scaler
-
+    # data['scaler'] = scaler
     return data
-
 
 def load_graph_data(pkl_filename):
     sensor_ids, sensor_id_to_ind, adj_mx = load_pickle(pkl_filename)

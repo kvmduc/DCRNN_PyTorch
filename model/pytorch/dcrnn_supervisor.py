@@ -1,19 +1,24 @@
 import os
 import time
+import os.path as osp
 
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+from datetime import datetime
 from lib import utils
 from model.pytorch.dcrnn_model import DCRNNModel
-from model.pytorch.loss import masked_mae_loss
+from model.pytorch.loss import masked_mae_loss, masked_mae_np, masked_mse_np, masked_mape_np
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1") if torch.cuda.is_available() else "cpu"
 
+result = {3:{"mae":{}, "mape":{}, "rmse":{}}, 6:{"mae":{}, "mape":{}, "rmse":{}}, 12:{"mae":{}, "mape":{}, "rmse":{}}}
 
 class DCRNNSupervisor:
-    def __init__(self, adj_mx, **kwargs):
+    def __init__(self, adj_mx, year, **kwargs):
+        self.year = year
         self._kwargs = kwargs
         self._data_kwargs = kwargs.get('data')
         self._model_kwargs = kwargs.get('model')
@@ -26,13 +31,9 @@ class DCRNNSupervisor:
         self._writer = SummaryWriter('runs/' + self._log_dir)
 
         log_level = self._kwargs.get('log_level', 'INFO')
-        self._logger = utils.get_logger(self._log_dir, __name__, 'info.log', level=log_level)
+        self._logger = utils.get_logger(self._log_dir, __name__, str(self.year) + 'info.log', level=log_level)
 
-        # data set
-        self._data = utils.load_dataset(**self._data_kwargs)
-        self.standard_scaler = self._data['scaler']
-
-        self.num_nodes = int(self._model_kwargs.get('num_nodes', 1))
+        self.num_nodes = int(adj_mx.shape[0])
         self.input_dim = int(self._model_kwargs.get('input_dim', 1))
         self.seq_len = int(self._model_kwargs.get('seq_len'))  # for the encoder
         self.output_dim = int(self._model_kwargs.get('output_dim', 1))
@@ -40,9 +41,13 @@ class DCRNNSupervisor:
             self._model_kwargs.get('use_curriculum_learning', False))
         self.horizon = int(self._model_kwargs.get('horizon', 1))  # for the decoder
 
+        # data set
+        self._data = utils.load_dataset(input_dim = self.input_dim, output_dim = self.output_dim, year = self.year, **self._data_kwargs)
+        # self.standard_scaler = self._data['scaler']
+
         # setup model
         dcrnn_model = DCRNNModel(adj_mx, self._logger, **self._model_kwargs)
-        self.dcrnn_model = dcrnn_model.cuda() if torch.cuda.is_available() else dcrnn_model
+        self.dcrnn_model = dcrnn_model.to(device) if torch.cuda.is_available() else dcrnn_model
         self._logger.info("Model created")
 
         self._epoch_num = self._train_kwargs.get('epoch', 0)
@@ -110,6 +115,8 @@ class DCRNNSupervisor:
         kwargs.update(self._train_kwargs)
         return self._train(**kwargs)
 
+    #################################################
+
     def evaluate(self, dataset='val', batches_seen=0):
         """
         Computes mean L1Loss
@@ -141,15 +148,72 @@ class DCRNNSupervisor:
             y_preds = np.concatenate(y_preds, axis=1)
             y_truths = np.concatenate(y_truths, axis=1)  # concatenate on batch dimension
 
-            y_truths_scaled = []
-            y_preds_scaled = []
-            for t in range(y_preds.shape[0]):
-                y_truth = self.standard_scaler.inverse_transform(y_truths[t])
-                y_pred = self.standard_scaler.inverse_transform(y_preds[t])
-                y_truths_scaled.append(y_truth)
-                y_preds_scaled.append(y_pred)
+            # y_truths_scaled = []
+            # y_preds_scaled = []
+            # for t in range(y_preds.shape[0]):
+                # y_truth = self.standard_scaler.inverse_transform(y_truths[t])
+                # y_pred = self.standard_scaler.inverse_transform(y_preds[t])
+                # y_truths_scaled.append(y_truth)
+                # y_preds_scaled.append(y_pred)
 
-            return mean_loss, {'prediction': y_preds_scaled, 'truth': y_truths_scaled}
+            return mean_loss, {'prediction': y_preds, 'truth': y_truths}
+
+    def metric(self, ground_truth, prediction):
+        global result
+        pred_time = [3,6,12]
+        self._logger.info("[*] year {}, testing".format(self.year))
+        for i in pred_time:
+            mae = masked_mae_np(ground_truth[:, :, :i], prediction[:, :, :i])
+            rmse = masked_mse_np(ground_truth[:, :, :i], prediction[:, :, :i]) ** 0.5
+            mape = masked_mape_np(ground_truth[:, :, :i], prediction[:, :, :i])
+            self._logger.info("T:{:d}\tMAE\t{:.4f}\tRMSE\t{:.4f}\tMAPE\t{:.4f}".format(i,mae,rmse,mape))
+            result[i]["mae"][self.year] = mae
+            result[i]["mape"][self.year] = mape
+            result[i]["rmse"][self.year] = rmse
+        return mae
+
+    def test_model(self, dataset='val', batches_seen=0):
+        """
+        Computes mean L1Loss
+        :return: mean L1Loss
+        """
+        with torch.no_grad():
+            self.dcrnn_model = self.dcrnn_model.eval()
+
+            val_iterator = self._data['{}_loader'.format(dataset)].get_iterator()
+            losses = []
+
+            y_truths = []
+            y_preds = []
+
+            for _, (x, y) in enumerate(val_iterator):
+                x, y = self._prepare_data(x, y)
+
+                output = self.dcrnn_model(x)
+                loss = self._compute_loss(y, output)
+                
+                losses.append(loss.item())
+
+                y_truths.append(y.cpu())
+                y_preds.append(output.cpu())
+
+            mean_loss = np.mean(losses)
+
+            self._writer.add_scalar('{} loss'.format(dataset), mean_loss, batches_seen)
+
+            y_preds = np.concatenate(y_preds, axis=1)
+            y_truths = np.concatenate(y_truths, axis=1)  # concatenate on batch dimension
+
+            _ = self.metric(y_truths, y_preds)
+            # y_truths_scaled = []
+            # y_preds_scaled = []
+            # for t in range(y_preds.shape[0]):
+                # y_truth = self.standard_scaler.inverse_transform(y_truths[t])
+                # y_pred = self.standard_scaler.inverse_transform(y_preds[t])
+                # y_truths_scaled.append(y_truth)
+                # y_preds_scaled.append(y_pred)
+
+            return mean_loss, {'prediction': y_preds, 'truth': y_truths}
 
     def _train(self, base_lr,
                steps, patience=50, epochs=100, lr_decay_ratio=0.1, log_every=1, save_model=1,
@@ -162,13 +226,17 @@ class DCRNNSupervisor:
         lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=steps,
                                                             gamma=lr_decay_ratio)
 
+        self._logger.info(self.year)
         self._logger.info('Start training ...')
-
+        
         # this will fail if model is loaded with a changed batch_size
         num_batches = self._data['train_loader'].num_batch
         self._logger.info("num_batches:{}".format(num_batches))
 
         batches_seen = num_batches * self._epoch_num
+        use_time = []
+
+        total_time = 0
 
         for epoch_num in range(self._epoch_num, epochs):
 
@@ -177,20 +245,22 @@ class DCRNNSupervisor:
             train_iterator = self._data['train_loader'].get_iterator()
             losses = []
 
-            start_time = time.time()
+            start_time = datetime.now()
 
             for _, (x, y) in enumerate(train_iterator):
                 optimizer.zero_grad()
 
                 x, y = self._prepare_data(x, y)
-
                 output = self.dcrnn_model(x, y, batches_seen)
 
                 if batches_seen == 0:
                     # this is a workaround to accommodate dynamically registered parameters in DCGRUCell
                     optimizer = torch.optim.Adam(self.dcrnn_model.parameters(), lr=base_lr, eps=epsilon)
+                
+                # y = y.to('cpu')
+                # output = output.to('cpu')
 
-                loss = self._compute_loss(y, output)
+                loss = self._compute_loss(y.cpu(), output.cpu())
 
                 self._logger.debug(loss.item())
 
@@ -203,13 +273,18 @@ class DCRNNSupervisor:
                 torch.nn.utils.clip_grad_norm_(self.dcrnn_model.parameters(), self.max_grad_norm)
 
                 optimizer.step()
+            
+            end_time = datetime.now()
+
+            total_time += (end_time - start_time).total_seconds()
+
+            use_time.append((end_time - start_time).total_seconds())
+
             self._logger.info("epoch complete")
             lr_scheduler.step()
-            self._logger.info("evaluating now!")
+            self._logger.info("evaluating now ! ")
 
             val_loss, _ = self.evaluate(dataset='val', batches_seen=batches_seen)
-
-            end_time = time.time()
 
             self._writer.add_scalar('training loss',
                                     np.mean(losses),
@@ -218,17 +293,20 @@ class DCRNNSupervisor:
             if (epoch_num % log_every) == log_every - 1:
                 message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, val_mae: {:.4f}, lr: {:.6f}, ' \
                           '{:.1f}s'.format(epoch_num, epochs, batches_seen,
-                                           np.mean(losses), val_loss, lr_scheduler.get_lr()[0],
-                                           (end_time - start_time))
+                                           np.mean(losses), val_loss, lr_scheduler.get_last_lr()[-1], float(use_time[-1]))
                 self._logger.info(message)
 
-            if (epoch_num % test_every_n_epochs) == test_every_n_epochs - 1:
-                test_loss, _ = self.evaluate(dataset='test', batches_seen=batches_seen)
-                message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, test_mae: {:.4f},  lr: {:.6f}, ' \
+            if (epoch_num % test_every_n_epochs) == test_every_n_epochs - 1: 
+                message = 'Epoch [{}/{}] ({}) train_mae: {:.4f},  lr: {:.6f}, ' \
                           '{:.1f}s'.format(epoch_num, epochs, batches_seen,
-                                           np.mean(losses), test_loss, lr_scheduler.get_lr()[0],
-                                           (end_time - start_time))
+                                           np.mean(losses), lr_scheduler.get_last_lr()[-1], float(use_time[-1]))
+                test_loss, _ = self.test_model(dataset='test', batches_seen=batches_seen)
+
                 self._logger.info(message)
+            
+            if epoch_num == epochs - 1:
+                message = 'YEAR : {} \n Total training time is : {:.1f}s \n Average traning time is : {:.1f}s'.format(self.year, total_time, sum(use_time)/len(use_time))
+                self._logger.info(message)				
 
             if val_loss < min_val_loss:
                 wait = 0
@@ -246,8 +324,14 @@ class DCRNNSupervisor:
                     break
 
     def _prepare_data(self, x, y):
+        # print('Raw data x :',x.shape)
+        # print('Raw data y :',y.shape)
         x, y = self._get_x_y(x, y)
+        # print('Get data x :',x.shape)
+        # print('Get data y :',y.shape)
         x, y = self._get_x_y_in_correct_dims(x, y)
+        # print('Final data x :',x.shape)
+        # print('Final data y :',y.shape)
         return x.to(device), y.to(device)
 
     def _get_x_y(self, x, y):
@@ -279,6 +363,6 @@ class DCRNNSupervisor:
         return x, y
 
     def _compute_loss(self, y_true, y_predicted):
-        y_true = self.standard_scaler.inverse_transform(y_true)
-        y_predicted = self.standard_scaler.inverse_transform(y_predicted)
+        # y_true = self.standard_scaler.inverse_transform(y_true)
+        # y_predicted = self.standard_scaler.inverse_transform(y_predicted)
         return masked_mae_loss(y_predicted, y_true)

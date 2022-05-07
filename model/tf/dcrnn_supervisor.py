@@ -32,7 +32,7 @@ class DCRNNSupervisor(object):
         self._log_dir = self._get_log_dir(kwargs)
         log_level = self._kwargs.get('log_level', 'INFO')
         self._logger = utils.get_logger(self._log_dir, __name__, 'info.log', level=log_level)
-        self._writer = tf.summary.FileWriter(self._log_dir)
+        self._writer = tf.summary.create_file_writer(self._log_dir)
         self._logger.info(kwargs)
 
         # Data preparation
@@ -44,13 +44,13 @@ class DCRNNSupervisor(object):
         # Build models.
         scaler = self._data['scaler']
         with tf.name_scope('Train'):
-            with tf.variable_scope('DCRNN', reuse=False):
+            with tf.compat.v1.variable_scope('DCRNN', reuse=False):
                 self._train_model = DCRNNModel(is_training=True, scaler=scaler,
                                                batch_size=self._data_kwargs['batch_size'],
                                                adj_mx=adj_mx, **self._model_kwargs)
 
         with tf.name_scope('Test'):
-            with tf.variable_scope('DCRNN', reuse=True):
+            with tf.compat.v1.variable_scope('DCRNN', reuse=True):
                 self._test_model = DCRNNModel(is_training=False, scaler=scaler,
                                               batch_size=self._data_kwargs['test_batch_size'],
                                               adj_mx=adj_mx, **self._model_kwargs)
