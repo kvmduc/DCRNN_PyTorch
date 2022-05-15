@@ -9,10 +9,11 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from lib import utils
 from model.pytorch.dcrnn_model import DCRNNModel
-from model.pytorch.loss import masked_mae_loss, masked_mae_np, masked_mse_np, masked_mape_np
+from model.pytorch.loss import masked_mae_loss
+from lib.metrics import masked_mae_np, masked_rmse_np, masked_mape_np
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cuda:1") if torch.cuda.is_available() else "cpu"
+device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
 
 result = {3:{"mae":{}, "mape":{}, "rmse":{}}, 6:{"mae":{}, "mape":{}, "rmse":{}}, 12:{"mae":{}, "mape":{}, "rmse":{}}}
 
@@ -46,8 +47,15 @@ class DCRNNSupervisor:
         # self.standard_scaler = self._data['scaler']
 
         # setup model
-        dcrnn_model = DCRNNModel(adj_mx, self._logger, **self._model_kwargs)
-        self.dcrnn_model = dcrnn_model.to(device) if torch.cuda.is_available() else dcrnn_model
+        if (self.year > int(self._data_kwargs['begin_year'])):
+            dcrnn_model = DCRNNModel(adj_mx, self._logger, **self._model_kwargs)
+            self.dcrnn_model = dcrnn_model.to(device) if torch.cuda.is_available() else dcrnn_model
+            self.load_best_model()
+            
+        else :
+            dcrnn_model = DCRNNModel(adj_mx, self._logger, **self._model_kwargs)
+            self.dcrnn_model = dcrnn_model.to(device) if torch.cuda.is_available() else dcrnn_model
+        
         self._logger.info("Model created")
 
         self._epoch_num = self._train_kwargs.get('epoch', 0)
@@ -83,22 +91,37 @@ class DCRNNSupervisor:
         return log_dir
 
     def save_model(self, epoch):
-        if not os.path.exists('models/'):
-            os.makedirs('models/')
+        if not os.path.exists('models/' + str(self.year) + '/'):
+            os.makedirs('models/' + str(self.year) + '/')
 
         config = dict(self._kwargs)
         config['model_state_dict'] = self.dcrnn_model.state_dict()
         config['epoch'] = epoch
-        torch.save(config, 'models/epo%d.tar' % epoch)
+        torch.save(config, 'models/{year}/epo{epo_num}.tar'.format(year = self.year, epo_num = epoch))
         self._logger.info("Saved model at {}".format(epoch))
         return 'models/epo%d.tar' % epoch
 
     def load_model(self):
         self._setup_graph()
-        assert os.path.exists('models/epo%d.tar' % self._epoch_num), 'Weights at epoch %d not found' % self._epoch_num
-        checkpoint = torch.load('models/epo%d.tar' % self._epoch_num, map_location='cpu')
+        assert os.path.exists('models/{year}/epo{epo_num}.tar'.format(year = self.year, epo_num = self._epoch_num)), 'Weights at epoch %d not found' % self._epoch_num
+        checkpoint = torch.load('models/{year}/epo{epo_num}.tar'.format(year = self.year, epo_num = self._epoch_num), map_location='cpu')
         self.dcrnn_model.load_state_dict(checkpoint['model_state_dict'])
         self._logger.info("Loaded model at {}".format(self._epoch_num))
+
+    def load_best_model(self):
+        self._setup_graph()
+        epo_list = []
+        for filename in os.listdir('models/{year}/'.format(year = int(self.year) - 1)): 
+            epo_list.append(filename[3:]) 					# already has .tar in it
+        epo_list= sorted(epo_list)
+        load_path = 'models/{year}/epo{epo_num}'.format(year = int(self.year) - 1, epo_num = epo_list[-1])
+        
+        assert os.path.exists(load_path), 'Weights at {} not found'.format(load_path)
+        checkpoint = torch.load(load_path)
+        
+        self.dcrnn_model.load_state_dict(checkpoint['model_state_dict'])
+        self._logger.info("Loaded model at {}".format(load_path))
+
 
     def _setup_graph(self):
         with torch.no_grad():
@@ -163,9 +186,9 @@ class DCRNNSupervisor:
         pred_time = [3,6,12]
         self._logger.info("[*] year {}, testing".format(self.year))
         for i in pred_time:
-            mae = masked_mae_np(ground_truth[:, :, :i], prediction[:, :, :i])
-            rmse = masked_mse_np(ground_truth[:, :, :i], prediction[:, :, :i]) ** 0.5
-            mape = masked_mape_np(ground_truth[:, :, :i], prediction[:, :, :i])
+            mae = masked_mae_np(preds = prediction[:, :, :i], labels = ground_truth[:, :, :i], null_val=0)
+            rmse = masked_rmse_np(preds = prediction[:, :, :i], labels = ground_truth[:, :, :i], null_val=0)
+            mape = masked_mape_np(preds = prediction[:, :, :i], labels = ground_truth[:, :, :i], null_val=0)
             self._logger.info("T:{:d}\tMAE\t{:.4f}\tRMSE\t{:.4f}\tMAPE\t{:.4f}".format(i,mae,rmse,mape))
             result[i]["mae"][self.year] = mae
             result[i]["mape"][self.year] = mape
@@ -260,7 +283,7 @@ class DCRNNSupervisor:
                 # y = y.to('cpu')
                 # output = output.to('cpu')
 
-                loss = self._compute_loss(y.cpu(), output.cpu())
+                loss = self._compute_loss(y_true = y.cpu(), y_predicted = output.cpu())
 
                 self._logger.debug(loss.item())
 

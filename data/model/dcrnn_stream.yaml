@@ -5,8 +5,8 @@ data:
   batch_size: 32
   test_batch_size: 32
   val_batch_size: 32
-  graph_pkl_filename: /data/cs.aau.dk/tungkvt/TrafficStream/deterministicStream/district3F11T17/graph
-  dataset_dir: /data/cs.aau.dk/tungkvt/TrafficStream/deterministicStream/district3F11T17/FastData
+  graph_pkl_filename: /data/cs.aau.dk/tungkvt/Trafficstream/district3F11T17/graph
+  dataset_dir: /data/cs.aau.dk/tungkvt/Trafficstream/district3F11T17/FastData
   begin_year: 2011
   end_year: 2017
 
@@ -37,4 +37,4 @@ train:
   optimizer: adam
   patience: 50
   steps: [20, 30, 40, 50]
-  test_every_n_epochs: 10
+  test_every_n_epochs: 5
